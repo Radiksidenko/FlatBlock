@@ -1,6 +1,6 @@
 //
 //  Tile.swift
-//  FlatCube
+//  FlatBlock
 //
 //  Created by Radomyr Sidenko on 14.05.2026.
 //
