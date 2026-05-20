@@ -12,11 +12,11 @@ struct GameView: View {
     @StateObject private var viewModel = GameViewModel()
 
     @State private var activePiece: Piece?
-    @State private var dragOffset: CGSize = .zero
     @State private var boardFrame: CGRect = .zero
     @State private var previewAnchor: GridAnchor?
+    @State private var dragLocation: CGPoint = .zero
+    @State private var dragPieceTileSize: CGFloat = 24
     @State private var hapticsEnabled = true
-    @State private var didTriggerPlacementHaptic = false
 
     private let dragStartHaptic = UIImpactFeedbackGenerator(style: .light)
     private let dragEndHaptic = UIImpactFeedbackGenerator(style: .medium)
@@ -26,50 +26,64 @@ struct GameView: View {
     private let blockSpacing: CGFloat = 10
     private let boardPadding: CGFloat = 8
     private let traySpacing: CGFloat = 14
+    private let floatingPieceOffset = CGSize(width: 0, height: -48)
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 16) {
-                header
+            ZStack {
+                VStack(spacing: 16) {
+                    header
 
-                GeometryReader { geometry in
-                    let width = geometry.size.width
-                    let totalSpacing = cellSpacing * 6 + blockSpacing * 2
-                    let tileSize = max(0, (width - boardPadding * 2 - totalSpacing) / 9)
-                    let logicalStep = tileSize + cellSpacing
-                    let boardSize = tileSize * 9 + totalSpacing
+                    GeometryReader { geometry in
+                        let width = geometry.size.width
+                        let totalSpacing = cellSpacing * 6 + blockSpacing * 2
+                        let tileSize = max(0, (width - boardPadding * 2 - totalSpacing) / 9)
+                        let logicalStep = tileSize + cellSpacing
+                        let boardSize = tileSize * 9 + totalSpacing
+                        let trayTileSize = max(18, tileSize * 0.72)
 
-                    VStack(spacing: 0) {
-                        ZStack(alignment: .topLeading) {
-                            boardGrid(tileSize: tileSize)
-                                .background(
-                                    GeometryReader { proxy in
-                                        Color.clear
-                                            .onAppear {
-                                                boardFrame = proxy.frame(in: .global)
-                                            }
-                                            .onChange(of: proxy.frame(in: .global)) { _, newValue in
-                                                boardFrame = newValue
-                                            }
-                                    }
-                                )
+                        VStack(spacing: 0) {
+                            ZStack(alignment: .topLeading) {
+                                boardGrid(tileSize: tileSize)
+                                    .padding(boardPadding)
+                                    .background(
+                                        GeometryReader { proxy in
+                                            Color.clear
+                                                .onAppear {
+                                                    boardFrame = proxy.frame(in: .global)
+                                                }
+                                                .onChange(of: proxy.frame(in: .global)) { _, newValue in
+                                                    boardFrame = newValue
+                                                }
+                                        }
+                                    )
+                            }
+                            .frame(width: boardSize + boardPadding * 2, height: boardSize + boardPadding * 2)
+                            .background(.thinMaterial)
+                            .clipShape(RoundedRectangle(cornerRadius: 16))
+
+                            pieceTray(tileSize: trayTileSize, logicalStep: logicalStep)
                         }
-                        .frame(width: boardSize + boardPadding * 2, height: boardSize + boardPadding * 2)
-                        .background(.thinMaterial)
-                        .clipShape(RoundedRectangle(cornerRadius: 16))
-
-                        pieceTray(tileSize: tileSize, logicalStep: logicalStep)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                        .onAppear {
+                            dragPieceTileSize = trayTileSize
+                        }
+                        .onChange(of: trayTileSize) { _, newValue in
+                            dragPieceTileSize = newValue
+                        }
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                }
 
-                if viewModel.isGameOver {
-                    Text("Game Over")
-                        .font(.headline)
-                        .foregroundStyle(.red)
+                    if viewModel.isGameOver {
+                        Text("Game Over")
+                            .font(.headline)
+                            .foregroundStyle(.red)
+                    }
                 }
+                .padding()
+
+                floatingDraggedPiece
             }
-            .padding()
+            .navigationTitle("Block Clone")
         }
     }
 
@@ -110,7 +124,8 @@ struct GameView: View {
                             tile: viewModel.tile(row: row, col: col),
                             size: tileSize,
                             isPreview: isPreviewCell(row: row, col: col),
-                            isPreviewValid: isPreviewValid()
+                            isPreviewValid: isPreviewValid(),
+                            isClearHighlight: isClearHighlightCell(row: row, col: col)
                         )
 
                         if col == 2 || col == 5 {
@@ -128,41 +143,64 @@ struct GameView: View {
 
     private func pieceTray(tileSize: CGFloat, logicalStep: CGFloat) -> some View {
         HStack(alignment: .bottom, spacing: traySpacing) {
-            ForEach(Array(viewModel.availablePieces.enumerated()), id: \.element.id) { index, piece in
-                PieceView(piece: piece, tileSize: max(18, tileSize * 0.72))
-                    .scaleEffect(activePiece?.id == piece.id ? 1.06 : 1)
-                    .offset(activePiece?.id == piece.id ? dragOffset : .zero)
-                    .opacity(activePiece?.id == piece.id ? 0.96 : 1)
-                    .gesture(pieceDragGesture(piece: piece, index: index, logicalStep: logicalStep))
-                    .animation(.interactiveSpring(response: 0.22, dampingFraction: 0.82), value: activePiece?.id)
+            ForEach(Array(viewModel.availablePieces.enumerated()), id: \.element.id) { _, piece in
+                PieceView(piece: piece, tileSize: tileSize)
+                    .opacity(activePiece?.id == piece.id ? 0 : 1)
+                    .gesture(pieceDragGesture(piece: piece, logicalStep: logicalStep, tileSize: tileSize))
             }
         }
         .frame(maxWidth: .infinity, minHeight: 132, alignment: .bottom)
     }
 
-    private func pieceDragGesture(piece: Piece, index: Int, logicalStep: CGFloat) -> some Gesture {
+    @ViewBuilder
+    private var floatingDraggedPiece: some View {
+        if let piece = activePiece {
+            PieceView(piece: piece, tileSize: dragPieceTileSize)
+                .shadow(color: .black.opacity(0.16), radius: 10, y: 6)
+                .scaleEffect(1.02)
+                .position(
+                    x: dragLocation.x + floatingPieceOffset.width,
+                    y: dragLocation.y + floatingPieceOffset.height
+                )
+                .allowsHitTesting(false)
+                .zIndex(1000)
+        }
+    }
+
+    private func pieceDragGesture(piece: Piece, logicalStep: CGFloat, tileSize: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 6, coordinateSpace: .global)
             .onChanged { value in
-                if activePiece == nil {
-                    activePiece = piece
-                    dragStartHaptic.prepare()
-                    if hapticsEnabled {
-                        dragStartHaptic.impactOccurred()
-                    }
-                }
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
 
-                guard activePiece?.id == piece.id else { return }
-                dragOffset = value.translation
-                updatePreview(for: piece, location: value.location, logicalStep: logicalStep)
+                withTransaction(transaction) {
+                    if activePiece == nil {
+                        activePiece = piece
+                        dragPieceTileSize = tileSize
+                        dragLocation = value.location
+
+                        dragStartHaptic.prepare()
+                        if hapticsEnabled {
+                            dragStartHaptic.impactOccurred()
+                        }
+                    }
+
+                    guard activePiece?.id == piece.id else { return }
+
+                    dragLocation = value.location
+                    updatePlacementTarget(for: piece, location: value.location, logicalStep: logicalStep)
+                }
             }
             .onEnded { value in
                 guard activePiece?.id == piece.id else { return }
-                updatePreview(for: piece, location: value.location, logicalStep: logicalStep)
+
+                dragLocation = value.location
+                updatePlacementTarget(for: piece, location: value.location, logicalStep: logicalStep)
                 finishDrag(for: piece)
             }
     }
 
-    private func updatePreview(for piece: Piece, location: CGPoint, logicalStep: CGFloat) {
+    private func updatePlacementTarget(for piece: Piece, location: CGPoint, logicalStep: CGFloat) {
         guard boardFrame != .zero else {
             previewAnchor = nil
             return
@@ -177,14 +215,8 @@ struct GameView: View {
 
         previewAnchor = anchor
 
-        if hapticsEnabled, viewModel.canPlace(piece, at: anchor.row, col: anchor.col), !didTriggerPlacementHaptic {
+        if hapticsEnabled, viewModel.canPlace(piece, at: anchor.row, col: anchor.col) {
             stepHaptic.prepare()
-            stepHaptic.selectionChanged()
-            didTriggerPlacementHaptic = true
-        }
-
-        if !viewModel.canPlace(piece, at: anchor.row, col: anchor.col) {
-            didTriggerPlacementHaptic = false
         }
     }
 
@@ -194,9 +226,8 @@ struct GameView: View {
                 dragEndHaptic.prepare()
                 dragEndHaptic.impactOccurred()
             }
-            withAnimation(.interactiveSpring(response: 0.22, dampingFraction: 0.84)) {
-                viewModel.placePiece(piece, at: anchor.row, col: anchor.col)
-            }
+
+            viewModel.placePiece(piece, at: anchor.row, col: anchor.col)
         }
 
         clearDragState()
@@ -204,9 +235,8 @@ struct GameView: View {
 
     private func clearDragState() {
         activePiece = nil
-        dragOffset = .zero
+        dragLocation = .zero
         previewAnchor = nil
-        didTriggerPlacementHaptic = false
     }
 
     private func isPreviewCell(row: Int, col: Int) -> Bool {
@@ -219,17 +249,43 @@ struct GameView: View {
         return viewModel.canPlace(piece, at: anchor.row, col: anchor.col)
     }
 
-    private func position(forRow row: Int, col: Int, tileSize: CGFloat) -> CGPoint {
-        CGPoint(
-            x: leadingOffset(for: col, tileSize: tileSize) + tileSize / 2,
-            y: leadingOffset(for: row, tileSize: tileSize) + tileSize / 2
-        )
-    }
+    private func isClearHighlightCell(row: Int, col: Int) -> Bool {
+        guard let piece = activePiece,
+              let anchor = previewAnchor,
+              viewModel.canPlace(piece, at: anchor.row, col: anchor.col) else {
+            return false
+        }
 
-    private func leadingOffset(for index: Int, tileSize: CGFloat) -> CGFloat {
-        let blockJumps = index / 3
-        let normalGaps = index - blockJumps
-        return CGFloat(index) * tileSize + CGFloat(normalGaps) * cellSpacing + CGFloat(blockJumps) * blockSpacing
+        let previewCells = Set(
+            piece.cells.map {
+                CellPosition(row: anchor.row + $0.row, col: anchor.col + $0.col)
+            }
+        )
+
+        let rowWillClear = (0..<9).allSatisfy { currentCol in
+            previewCells.contains(CellPosition(row: row, col: currentCol)) ||
+            viewModel.tile(row: row, col: currentCol) != nil
+        }
+
+        let colWillClear = (0..<9).allSatisfy { currentRow in
+            previewCells.contains(CellPosition(row: currentRow, col: col)) ||
+            viewModel.tile(row: currentRow, col: col) != nil
+        }
+
+        let blockRow = row / 3
+        let blockCol = col / 3
+
+        let blockWillClear = (0..<3).allSatisfy { localRow in
+            (0..<3).allSatisfy { localCol in
+                let targetRow = blockRow * 3 + localRow
+                let targetCol = blockCol * 3 + localCol
+
+                return previewCells.contains(CellPosition(row: targetRow, col: targetCol)) ||
+                viewModel.tile(row: targetRow, col: targetCol) != nil
+            }
+        }
+
+        return rowWillClear || colWillClear || blockWillClear
     }
 
     private func projectedIndex(for value: CGFloat, logicalStep: CGFloat) -> Int {
@@ -248,6 +304,11 @@ struct GameView: View {
 }
 
 private struct GridAnchor: Equatable {
+    let row: Int
+    let col: Int
+}
+
+private struct CellPosition: Hashable {
     let row: Int
     let col: Int
 }
@@ -276,6 +337,7 @@ private struct BoardCellView: View {
     let size: CGFloat
     let isPreview: Bool
     let isPreviewValid: Bool
+    let isClearHighlight: Bool
 
     var body: some View {
         RoundedRectangle(cornerRadius: 4)
@@ -283,12 +345,16 @@ private struct BoardCellView: View {
             .frame(width: size, height: size)
             .overlay {
                 RoundedRectangle(cornerRadius: 4)
-                    .stroke(strokeStyle, lineWidth: isPreview ? 1.6 : 1)
+                    .stroke(strokeStyle, lineWidth: strokeWidth)
             }
             .shadow(color: .black.opacity(tile == nil ? 0.02 : 0.08), radius: 1, y: 1)
     }
 
     private var fillStyle: AnyShapeStyle {
+        if isClearHighlight {
+            return AnyShapeStyle(Color.yellow.opacity(tile == nil ? 0.28 : 0.22))
+        }
+
         if let tile {
             if isPreview {
                 return AnyShapeStyle(tile.color.color.opacity(isPreviewValid ? 0.45 : 0.25))
@@ -304,10 +370,21 @@ private struct BoardCellView: View {
     }
 
     private var strokeStyle: Color {
+        if isClearHighlight {
+            return .yellow.opacity(0.9)
+        }
+
         if isPreview {
             return isPreviewValid ? .green : .red
         }
+
         return .white.opacity(tile == nil ? 0.08 : 0.25)
+    }
+
+    private var strokeWidth: CGFloat {
+        if isClearHighlight { return 2.2 }
+        if isPreview { return 1.6 }
+        return 1
     }
 }
 
