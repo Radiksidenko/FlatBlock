@@ -8,6 +8,8 @@
 import SwiftUI
 
 final class GameViewModel: ObservableObject {
+    @AppStorage("best_score") private var storedBestScore = 0
+
     @Published private(set) var board = Board()
     @Published private(set) var score = 0
     @Published private(set) var bestScore = 0
@@ -18,6 +20,7 @@ final class GameViewModel: ObservableObject {
     @Published private(set) var lastPlacement: PlacementResult?
 
     init() {
+        bestScore = storedBestScore
         newGame()
     }
 
@@ -29,6 +32,7 @@ final class GameViewModel: ObservableObject {
         isGameOver = false
         lastPlacement = nil
         availablePieces = PieceLibrary.randomPieces(count: 3)
+        bestScore = storedBestScore
         updateGameOverState()
     }
 
@@ -40,6 +44,7 @@ final class GameViewModel: ObservableObject {
         isGameOver = false
         lastPlacement = nil
         availablePieces = PieceLibrary.randomPieces(count: 3)
+        bestScore = storedBestScore
         updateGameOverState()
     }
 
@@ -79,7 +84,7 @@ final class GameViewModel: ObservableObject {
             combo = 0
         }
 
-        bestScore = max(bestScore, score)
+        updateBestScoreIfNeeded()
         lastPlacement = result
 
         refillPiecesIfNeeded()
@@ -98,5 +103,12 @@ final class GameViewModel: ObservableObject {
 
     private func updateGameOverState() {
         isGameOver = !availablePieces.contains { board.hasAnyValidPlacement(for: $0) }
+    }
+
+    private func updateBestScoreIfNeeded() {
+        if score > storedBestScore {
+            storedBestScore = score
+        }
+        bestScore = storedBestScore
     }
 }
